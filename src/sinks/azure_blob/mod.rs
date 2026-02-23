@@ -6,4 +6,5 @@ mod integration_tests;
 #[cfg(test)]
 mod test;
 
+pub use self::config::AzureBlobSinkAuthorization;
 pub use self::config::AzureBlobSinkConfig;

@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use azure_storage_blob::BlobContainerClient;
 use tower::ServiceBuilder;
+use url::Url;
 use vector_lib::{
     codecs::{JsonSerializerConfig, NewlineDelimitedEncoderConfig, encoding::Framer},
     configurable::configurable_component,
@@ -33,6 +34,49 @@ impl TowerRequestConfigDefaults for AzureBlobTowerRequestConfigDefaults {
     const RATE_LIMIT_NUM: u64 = 250;
 }
 
+/// Authorization methods for the Azure Blob Storage sink.
+///
+#[configurable_component]
+#[derive(Clone, Debug)]
+pub enum AzureBlobSinkAuthorization {
+    /// The Azure Blob Storage Account connection string.
+    ///
+    /// Authentication with an access key or shared access signature (SAS)
+    /// are supported authentication methods. If using a non-account SAS,
+    /// healthchecks will fail and will need to be disabled by setting
+    /// `healthcheck.enabled` to `false` for this sink
+    ///
+    /// When generating an account SAS, the following are the minimum required option
+    /// settings for Vector to access blob storage and pass a health check.
+    /// | Option                 | Value              |
+    /// | ---------------------- | ------------------ |
+    /// | Allowed services       | Blob               |
+    /// | Allowed resource types | Container & Object |
+    /// | Allowed permissions    | Read & Create      |
+    ///
+    /// Use a connection string for authentication. The connection string can be provided in the `connection_string` field of the sink configuration.
+    ///
+    /// ** SECURITY NOTE **
+    /// Connection strings contain sensitive information, such as access keys or SAS tokens, that can be used to gain unauthorized access to your Azure Blob Storage resources.
+    /// It is important to keep connection strings secure and not expose them in logs, error messages, or version control systems.
+    ///
+    /// Numerous security breaches have occurred due to leaked connection strings,
+    /// so please take care to manage them securely. Consider using secret management tools to store and manage connection strings securely.
+    ConnectionString(SensitiveString),
+
+    /// Use Azure AD Workload Identity for authentication. This method is typically used when Vector is running in an Azure environment that supports workload identity, such as Azure Kubernetes Service (AKS) with workload identity enabled.
+    WorkloadIdentityCredential,
+
+    /// Use Managed Identity Credential for authentication. This method is typically used when Vector is running in an Azure environment that supports managed identities, such as Azure Virtual Machines or Azure App Service.
+    ManagedIdentityCredential,
+
+    /// Use Azure Pipeline Credential for authentication. This method is typically used in Azure DevOps pipelines where the pipeline has been granted access to the Azure Blob Storage resources.
+    AzurePipelineCredential,
+
+    /// Use Developer Tools Credential for authentication. This method is typically used for local development and testing, allowing developers to authenticate using their Azure developer tools credentials.
+    DeveloperToolsCredential,
+}
+
 /// Configuration for the `azure_blob` sink.
 #[configurable_component(sink(
     "azure_blob",
@@ -55,13 +99,42 @@ pub struct AzureBlobSinkConfig {
     /// | Allowed services       | Blob               |
     /// | Allowed resource types | Container & Object |
     /// | Allowed permissions    | Read & Create      |
+    ///
+    /// Note that connection string authentication is mutually exclusive with the `authorization` field, and will take precedence over any specified authorization method in the `authorization` field.
+    /// If both a `connection_string` and an `authorization` method are provided, sink initialization will fail.
+    /// If neither a `connection_string` nor an `authorization` method are provided, sink initialization will fail.
+    ///
+    /// # SECURITY NOTE
+    /// Connection strings contain sensitive information, such as access keys or SAS
+    /// tokens, that can be used to gain unauthorized access to your Azure Blob Storage
+    /// resources. It is important to keep connection strings secure and not expose them
+    /// in logs, error messages, or version control systems.
+    ///
+    /// Numerous security breaches have occurred due to leaked connection strings,
+    /// so please take care to manage them securely. Consider using secret management
+    /// tools to store and manage connection strings securely.
+    ///
     #[configurable(metadata(
         docs::examples = "DefaultEndpointsProtocol=https;AccountName=mylogstorage;AccountKey=storageaccountkeybase64encoded;EndpointSuffix=core.windows.net"
     ))]
     #[configurable(metadata(
         docs::examples = "BlobEndpoint=https://mylogstorage.blob.core.windows.net/;SharedAccessSignature=generatedsastoken"
     ))]
-    pub connection_string: SensitiveString,
+    pub connection_string: Option<SensitiveString>,
+
+    /// The authorization method to use when connecting to Azure Blob Storage.
+    ///
+    /// If not specified, Vector will attempt to determine the appropriate authentication method based on
+    /// the provided `connection_string`. If a `connection_string` is not provided, Vector will attempt to
+    /// authenticate using Azure AD Workload Identity, and if that fails, will fall back to Managed
+    /// Identity Credential authentication.
+    #[configurable]
+    pub authorization: Option<AzureBlobSinkAuthorization>,
+
+    /// The base URL for the Azure Blob Storage account. This is required when using authentication mechanisms other than ConnectionString,
+    /// and is ignored when using `ConnectionString` authentication since the storage account is already specified in the connection string.
+    #[configurable]
+    pub storage_account: Option<Url>,
 
     /// The Azure Blob Storage Account container name.
     #[configurable(metadata(docs::examples = "my-logs"))]
@@ -138,6 +211,10 @@ pub struct AzureBlobSinkConfig {
         skip_serializing_if = "crate::serde::is_default"
     )]
     pub(super) acknowledgements: AcknowledgementsConfig,
+
+    /// Self-Signed TLS Server certificate for use when validating TLS connections to local servers (Azurite)
+    #[cfg(test)]
+    pub tls_server_certificate: Option<String>,
 }
 
 pub fn default_blob_prefix() -> Template {
@@ -147,16 +224,24 @@ pub fn default_blob_prefix() -> Template {
 impl GenerateConfig for AzureBlobSinkConfig {
     fn generate_config() -> toml::Value {
         toml::Value::try_from(Self {
-            connection_string: String::from("DefaultEndpointsProtocol=https;AccountName=some-account-name;AccountKey=some-account-key;").into(),
+            connection_string: None,
+            authorization: None,
+            storage_account: None,
             container_name: String::from("logs"),
             blob_prefix: default_blob_prefix(),
             blob_time_format: Some(String::from("%s")),
             blob_append_uuid: Some(true),
-            encoding: (Some(NewlineDelimitedEncoderConfig::new()), JsonSerializerConfig::default()).into(),
+            encoding: (
+                Some(NewlineDelimitedEncoderConfig::new()),
+                JsonSerializerConfig::default(),
+            )
+                .into(),
             compression: Compression::gzip_default(),
             batch: BatchConfig::default(),
             request: TowerRequestConfig::default(),
             acknowledgements: Default::default(),
+            #[cfg(test)]
+            tls_server_certificate: None,
         })
         .unwrap()
     }
@@ -166,10 +251,29 @@ impl GenerateConfig for AzureBlobSinkConfig {
 #[typetag::serde(name = "azure_blob")]
 impl SinkConfig for AzureBlobSinkConfig {
     async fn build(&self, cx: SinkContext) -> Result<(VectorSink, Healthcheck)> {
+        if self.connection_string.is_none() && self.authorization.is_none() {
+            return Err(
+                "Either a connection string or an authorization method must be provided".into(),
+            );
+        } else if self.connection_string.is_some() && self.authorization.is_some() {
+            return Err(
+            "Both connection string and authorization method cannot be provided at the same time"
+                .into(),
+            );
+        }
+        let authorization = if self.connection_string.is_some() {
+            AzureBlobSinkAuthorization::ConnectionString(self.connection_string.clone().unwrap())
+        } else {
+            self.authorization.clone().unwrap()
+        };
+
         let client = azure_common::config::build_client(
-            self.connection_string.clone().into(),
-            self.container_name.clone(),
+            authorization,
+            self.storage_account.clone(),
+            &self.container_name,
             cx.proxy(),
+            #[cfg(test)]
+            self.tls_server_certificate.clone(),
         )?;
 
         let healthcheck = azure_common::config::build_healthcheck(

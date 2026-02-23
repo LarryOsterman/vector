@@ -1,10 +1,25 @@
-use std::io::{BufRead, BufReader};
+// cspell:ignore devstoreaccount connectionstring tokencredential
 
+use super::config::AzureBlobSinkConfig;
+use crate::{
+    event::{Event, EventArray, LogEvent},
+    sinks::{
+        VectorSink,
+        azure_blob::AzureBlobSinkAuthorization,
+        azure_common,
+        util::{Compression, TowerRequestConfig},
+    },
+    test_util::{
+        components::{SINK_TAGS, assert_sink_compliance},
+        random_events_with_stream, random_lines, random_lines_with_stream, random_string,
+    },
+};
 use azure_core::http::StatusCode;
-
 use bytes::{Buf, BytesMut};
 use flate2::read::GzDecoder;
 use futures::{Stream, StreamExt, stream};
+use std::io::{BufRead, BufReader};
+use url::Url;
 use vector_lib::{
     ByteSizeOf,
     codecs::{
@@ -13,26 +28,34 @@ use vector_lib::{
     },
 };
 
-use super::config::AzureBlobSinkConfig;
-use crate::{
-    event::{Event, EventArray, LogEvent},
-    sinks::{
-        VectorSink, azure_common,
-        util::{Compression, TowerRequestConfig},
-    },
-    test_util::{
-        components::{SINK_TAGS, assert_sink_compliance},
-        random_events_with_stream, random_lines, random_lines_with_stream, random_string,
-    },
-};
+// static INIT_LOGGING: std::sync::Once = std::sync::Once::new();
+
+// fn init_tracing() {
+//     INIT_LOGGING.call_once(|| {
+//         use tracing_subscriber::{EnvFilter, fmt::format::FmtSpan};
+//         tracing_subscriber::fmt()
+//             .with_env_filter(EnvFilter::from_default_env())
+//             .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
+//             .with_ansi(std::env::var("NO_COLOR").map_or(true, |v| v.is_empty()))
+//             .with_writer(std::io::stderr)
+//             .init();
+//     });
+// }
 
 #[tokio::test]
-async fn azure_blob_healthcheck_passed() {
-    let config = AzureBlobSinkConfig::new_emulator().await;
+async fn azure_blob_connection_string_healthcheck_passed() {
+    let config = AzureBlobSinkConfig::new_connection_string_emulator().await;
+    let authorization = if config.connection_string.is_none() {
+        config.authorization.unwrap().clone()
+    } else {
+        AzureBlobSinkAuthorization::ConnectionString(config.connection_string.unwrap().clone())
+    };
     let client = azure_common::config::build_client(
-        config.connection_string.clone().into(),
-        config.container_name.clone(),
+        authorization,
+        config.storage_account.clone(),
+        &config.container_name,
         &crate::config::ProxyConfig::default(),
+        config.tls_server_certificate.clone(),
     )
     .expect("Failed to create client");
 
@@ -43,16 +66,46 @@ async fn azure_blob_healthcheck_passed() {
 }
 
 #[tokio::test]
-async fn azure_blob_healthcheck_unknown_container() {
-    let config = AzureBlobSinkConfig::new_emulator().await;
+async fn azure_blob_token_credential_healthcheck_passed() {
+    let config = AzureBlobSinkConfig::new_token_emulator().await;
+    let authorization = if config.connection_string.is_none() {
+        config.authorization.unwrap().clone()
+    } else {
+        AzureBlobSinkAuthorization::ConnectionString(config.connection_string.unwrap().clone())
+    };
+    let client = azure_common::config::build_client(
+        authorization,
+        config.storage_account.clone(),
+        &config.container_name,
+        &crate::config::ProxyConfig::default(),
+        config.tls_server_certificate.clone(),
+    )
+    .expect("Failed to create client");
+
+    azure_common::config::build_healthcheck(config.container_name, client)
+        .expect("Failed to build healthcheck")
+        .await
+        .expect("Failed to pass healthcheck");
+}
+
+#[tokio::test]
+async fn azure_blob_healthcheck_connection_string_unknown_container() {
+    let config = AzureBlobSinkConfig::new_connection_string_emulator().await;
     let config = AzureBlobSinkConfig {
         container_name: String::from("other-container-name"),
         ..config
     };
+    let authorization = if config.connection_string.is_none() {
+        config.authorization.unwrap().clone()
+    } else {
+        AzureBlobSinkAuthorization::ConnectionString(config.connection_string.unwrap().clone())
+    };
     let client = azure_common::config::build_client(
-        config.connection_string.clone().into(),
-        config.container_name.clone(),
+        authorization,
+        config.storage_account.clone(),
+        &config.container_name,
         &crate::config::ProxyConfig::default(),
+        config.tls_server_certificate.clone(),
     )
     .expect("Failed to create client");
 
@@ -67,9 +120,40 @@ async fn azure_blob_healthcheck_unknown_container() {
 }
 
 #[tokio::test]
-async fn azure_blob_insert_lines_into_blob() {
+async fn azure_blob_healthcheck_token_credential_unknown_container() {
+    let config = AzureBlobSinkConfig::new_token_emulator().await;
+    let config = AzureBlobSinkConfig {
+        container_name: String::from("other-container-name"),
+        ..config
+    };
+    let authorization = if config.connection_string.is_none() {
+        config.authorization.unwrap().clone()
+    } else {
+        AzureBlobSinkAuthorization::ConnectionString(config.connection_string.unwrap().clone())
+    };
+    let client = azure_common::config::build_client(
+        authorization,
+        config.storage_account.clone(),
+        &config.container_name,
+        &crate::config::ProxyConfig::default(),
+        config.tls_server_certificate.clone(),
+    )
+    .expect("Failed to create client");
+
+    assert_eq!(
+        azure_common::config::build_healthcheck(config.container_name, client)
+            .unwrap()
+            .await
+            .unwrap_err()
+            .to_string(),
+        "Container: \"other-container-name\" not found"
+    );
+}
+
+#[tokio::test]
+async fn azure_blob_connection_string_insert_lines_into_blob() {
     let blob_prefix = format!("lines/into/blob/{}", random_string(10));
-    let config = AzureBlobSinkConfig::new_emulator().await;
+    let config = AzureBlobSinkConfig::new_connection_string_emulator().await;
     let config = AzureBlobSinkConfig {
         blob_prefix: blob_prefix.clone().try_into().unwrap(),
         ..config
@@ -88,9 +172,60 @@ async fn azure_blob_insert_lines_into_blob() {
 }
 
 #[tokio::test]
-async fn azure_blob_insert_json_into_blob() {
+async fn azure_blob_token_credential_insert_lines_into_blob() {
+    let blob_prefix = format!("lines/into/blob/{}", random_string(10));
+    let config = AzureBlobSinkConfig::new_token_emulator().await;
+    let config = AzureBlobSinkConfig {
+        blob_prefix: blob_prefix.clone().try_into().unwrap(),
+        ..config
+    };
+    let (lines, input) = random_lines_with_stream(100, 10, None);
+
+    config.run_assert(input).await;
+
+    let blobs = config.list_blobs(blob_prefix).await;
+    assert_eq!(blobs.len(), 1);
+    assert!(blobs[0].clone().ends_with(".log"));
+    let (content_type, content_encoding, blob_lines) = config.get_blob(blobs[0].clone()).await;
+    assert_eq!(content_type, Some(String::from("text/plain")));
+    assert_eq!(content_encoding, None);
+    assert_eq!(lines, blob_lines);
+}
+
+#[tokio::test]
+async fn azure_blob_connection_string_insert_json_into_blob() {
     let blob_prefix = format!("json/into/blob/{}", random_string(10));
-    let config = AzureBlobSinkConfig::new_emulator().await;
+    let config = AzureBlobSinkConfig::new_connection_string_emulator().await;
+    let config = AzureBlobSinkConfig {
+        blob_prefix: blob_prefix.clone().try_into().unwrap(),
+        encoding: (
+            Some(NewlineDelimitedEncoderConfig::new()),
+            JsonSerializerConfig::default(),
+        )
+            .into(),
+        ..config
+    };
+    let (events, input) = random_events_with_stream(100, 10, None);
+
+    config.run_assert(input).await;
+
+    let blobs = config.list_blobs(blob_prefix).await;
+    assert_eq!(blobs.len(), 1);
+    assert!(blobs[0].clone().ends_with(".log"));
+    let (content_type, content_encoding, blob_lines) = config.get_blob(blobs[0].clone()).await;
+    assert_eq!(content_encoding, None);
+    assert_eq!(content_type, Some(String::from("application/x-ndjson")));
+    let expected = events
+        .iter()
+        .map(|event| serde_json::to_string(&event.as_log().all_event_fields().unwrap()).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(expected, blob_lines);
+}
+
+#[tokio::test]
+async fn azure_blob_token_credential_insert_json_into_blob() {
+    let blob_prefix = format!("json/into/blob/{}", random_string(10));
+    let config = AzureBlobSinkConfig::new_token_emulator().await;
     let config = AzureBlobSinkConfig {
         blob_prefix: blob_prefix.clone().try_into().unwrap(),
         encoding: (
@@ -122,9 +257,35 @@ async fn azure_blob_insert_json_into_blob() {
 // This test fails to get the posted blob with "header not found content-length".
 // However, we inspected that the sink writes the expected contents to Azure thus this is a retrieval/test issue.
 // Additional context: https://github.com/Azure/Azurite/issues/629
-async fn azure_blob_insert_lines_into_blob_gzip() {
+async fn azure_blob_connection_string_insert_lines_into_blob_gzip() {
     let blob_prefix = format!("lines-gzip/into/blob/{}", random_string(10));
-    let config = AzureBlobSinkConfig::new_emulator().await;
+    let config = AzureBlobSinkConfig::new_connection_string_emulator().await;
+    let config = AzureBlobSinkConfig {
+        blob_prefix: blob_prefix.clone().try_into().unwrap(),
+        compression: Compression::gzip_default(),
+        ..config
+    };
+    let (lines, events) = random_lines_with_stream(100, 10, None);
+
+    config.run_assert(events).await;
+
+    let blobs = config.list_blobs(blob_prefix).await;
+    assert_eq!(blobs.len(), 1);
+    assert!(blobs[0].clone().ends_with(".log.gz"));
+    let (content_type, content_encoding, blob_lines) = config.get_blob(blobs[0].clone()).await;
+    assert_eq!(content_encoding, Some(String::from("gzip")));
+    assert_eq!(content_type, Some(String::from("text/plain")));
+    assert_eq!(lines, blob_lines);
+}
+
+#[ignore]
+#[tokio::test]
+// This test fails to get the posted blob with "header not found content-length".
+// However, we inspected that the sink writes the expected contents to Azure thus this is a retrieval/test issue.
+// Additional context: https://github.com/Azure/Azurite/issues/629
+async fn azure_blob_token_credential_insert_lines_into_blob_gzip() {
+    let blob_prefix = format!("lines-gzip/into/blob/{}", random_string(10));
+    let config = AzureBlobSinkConfig::new_token_emulator().await;
     let config = AzureBlobSinkConfig {
         blob_prefix: blob_prefix.clone().try_into().unwrap(),
         compression: Compression::gzip_default(),
@@ -147,9 +308,43 @@ async fn azure_blob_insert_lines_into_blob_gzip() {
 #[tokio::test]
 // This test will fail with Azurite blob emulator because of this issue:
 // https://github.com/Azure/Azurite/issues/629
-async fn azure_blob_insert_json_into_blob_gzip() {
+async fn azure_blob_connection_string_insert_json_into_blob_gzip() {
     let blob_prefix = format!("json-gzip/into/blob/{}", random_string(10));
-    let config = AzureBlobSinkConfig::new_emulator().await;
+    let config = AzureBlobSinkConfig::new_connection_string_emulator().await;
+    let config = AzureBlobSinkConfig {
+        blob_prefix: blob_prefix.clone().try_into().unwrap(),
+        encoding: (
+            Some(NewlineDelimitedEncoderConfig::new()),
+            JsonSerializerConfig::default(),
+        )
+            .into(),
+        compression: Compression::gzip_default(),
+        ..config
+    };
+    let (events, input) = random_events_with_stream(100, 10, None);
+
+    config.run_assert(input).await;
+
+    let blobs = config.list_blobs(blob_prefix).await;
+    assert_eq!(blobs.len(), 1);
+    assert!(blobs[0].clone().ends_with(".log.gz"));
+    let (content_type, content_encoding, blob_lines) = config.get_blob(blobs[0].clone()).await;
+    assert_eq!(content_encoding, Some(String::from("gzip")));
+    assert_eq!(content_type, Some(String::from("application/x-ndjson")));
+    let expected = events
+        .iter()
+        .map(|event| serde_json::to_string(&event.as_log().all_event_fields().unwrap()).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(expected, blob_lines);
+}
+
+#[ignore]
+#[tokio::test]
+// This test will fail with Azurite blob emulator because of this issue:
+// https://github.com/Azure/Azurite/issues/629
+async fn azure_blob_token_credential_insert_json_into_blob_gzip() {
+    let blob_prefix = format!("json-gzip/into/blob/{}", random_string(10));
+    let config = AzureBlobSinkConfig::new_token_emulator().await;
     let config = AzureBlobSinkConfig {
         blob_prefix: blob_prefix.clone().try_into().unwrap(),
         encoding: (
@@ -178,13 +373,13 @@ async fn azure_blob_insert_json_into_blob_gzip() {
 }
 
 #[tokio::test]
-async fn azure_blob_rotate_files_after_the_buffer_size_is_reached() {
+async fn azure_blob_connection_string_rotate_files_after_the_buffer_size_is_reached() {
     let groups = 3;
     let (lines, size, input) = random_lines_with_stream_with_group_key(100, 30, groups);
     let size_per_group = (size / groups) + 10;
 
     let blob_prefix = format!("lines-rotate/into/blob/{}", random_string(10));
-    let mut config = AzureBlobSinkConfig::new_emulator().await;
+    let mut config = AzureBlobSinkConfig::new_connection_string_emulator().await;
     config.batch.max_bytes = Some(size_per_group);
 
     let config = AzureBlobSinkConfig {
@@ -211,12 +406,65 @@ async fn azure_blob_rotate_files_after_the_buffer_size_is_reached() {
     }
 }
 
+#[tokio::test]
+async fn azure_blob_token_credential_rotate_files_after_the_buffer_size_is_reached() {
+    let groups = 3;
+    let (lines, size, input) = random_lines_with_stream_with_group_key(100, 30, groups);
+    let size_per_group = (size / groups) + 10;
+
+    let blob_prefix = format!("lines-rotate/into/blob/{}", random_string(10));
+    let mut config = AzureBlobSinkConfig::new_token_emulator().await;
+    config.batch.max_bytes = Some(size_per_group);
+
+    let config = AzureBlobSinkConfig {
+        blob_prefix: (blob_prefix.clone() + "{{key}}").try_into().unwrap(),
+        blob_append_uuid: Some(false),
+        batch: config.batch,
+        ..config
+    };
+
+    config.run_assert(input).await;
+
+    let blobs = config.list_blobs(blob_prefix).await;
+    assert_eq!(blobs.len(), 3);
+    let response = stream::iter(blobs)
+        .fold(Vec::new(), |mut acc, blob| async {
+            let (_, _, lines) = config.get_blob(blob).await;
+            acc.push(lines);
+            acc
+        })
+        .await;
+
+    for i in 0..groups {
+        assert_eq!(&lines[(i * 10)..((i + 1) * 10)], response[i].as_slice());
+    }
+}
+
+async fn load_tls_certificate() -> Option<String> {
+    // Load self-signed TLS certificate from environment variable for use in testing against Azurite with HTTPS.
+    match std::env::var("AZURE_TLS_CERT") {
+        Ok(cert_filename) if !cert_filename.is_empty() => {
+            match tokio::fs::read_to_string(cert_filename).await {
+                Ok(cert) => Some(cert),
+                Err(e) => {
+                    warn!("Failed to read TLS certificate file: {e}");
+                    None
+                }
+            }
+        }
+        _ => None,
+    }
+}
+
 impl AzureBlobSinkConfig {
-    pub async fn new_emulator() -> AzureBlobSinkConfig {
+    pub async fn new_connection_string_emulator() -> AzureBlobSinkConfig {
+        let tls_server_certificate = load_tls_certificate().await;
         let address = std::env::var("AZURE_ADDRESS").unwrap_or_else(|_| "localhost".into());
         let config = AzureBlobSinkConfig {
-            connection_string: format!("UseDevelopmentStorage=true;DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://{address}:10000/devstoreaccount1;QueueEndpoint=http://{address}:10001/devstoreaccount1;TableEndpoint=http://{address}:10002/devstoreaccount1;").into(),
-                container_name: "logs".to_string(),
+            connection_string: Some(format!("UseDevelopmentStorage=true;DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=https://{address}:10000/devstoreaccount1;QueueEndpoint=https://{address}:10001/devstoreaccount1;TableEndpoint=https://{address}:10002/devstoreaccount1;").into()),
+            storage_account: None,
+            authorization:None,
+            container_name: "logs".to_string(),
                 blob_prefix: Default::default(),
                 blob_time_format: None,
                 blob_append_uuid: None,
@@ -225,6 +473,7 @@ impl AzureBlobSinkConfig {
                 batch: Default::default(),
                 request: TowerRequestConfig::default(),
                 acknowledgements: Default::default(),
+                tls_server_certificate,
             };
 
         config.ensure_container().await;
@@ -232,11 +481,44 @@ impl AzureBlobSinkConfig {
         config
     }
 
+    pub async fn new_token_emulator() -> AzureBlobSinkConfig {
+        let address = std::env::var("AZURE_ADDRESS").unwrap_or_else(|_| "localhost".into());
+        let tls_server_certificate = load_tls_certificate().await;
+        let config = AzureBlobSinkConfig {
+            connection_string: None,
+            storage_account: Some(
+                Url::parse(&format!("https://{address}:10000/devstoreaccount1")).unwrap(),
+            ),
+            authorization: Some(AzureBlobSinkAuthorization::DeveloperToolsCredential),
+            container_name: "logs".to_string(),
+            blob_prefix: Default::default(),
+            blob_time_format: None,
+            blob_append_uuid: None,
+            encoding: (None::<FramingConfig>, TextSerializerConfig::default()).into(),
+            compression: Compression::None,
+            batch: Default::default(),
+            request: TowerRequestConfig::default(),
+            acknowledgements: Default::default(),
+            tls_server_certificate,
+        };
+
+        config.ensure_container().await;
+
+        config
+    }
+
     fn to_sink(&self) -> VectorSink {
+        let authorization = if self.connection_string.is_none() {
+            self.authorization.clone().unwrap()
+        } else {
+            AzureBlobSinkAuthorization::ConnectionString(self.connection_string.clone().unwrap())
+        };
         let client = azure_common::config::build_client(
-            self.connection_string.clone().into(),
-            self.container_name.clone(),
+            authorization,
+            self.storage_account.clone(),
+            &self.container_name,
             &crate::config::ProxyConfig::default(),
+            self.tls_server_certificate.clone(),
         )
         .expect("Failed to create client");
 
@@ -251,10 +533,17 @@ impl AzureBlobSinkConfig {
     }
 
     pub async fn list_blobs(&self, prefix: String) -> Vec<String> {
+        let authorization = if self.connection_string.is_none() {
+            self.authorization.clone().unwrap()
+        } else {
+            AzureBlobSinkAuthorization::ConnectionString(self.connection_string.clone().unwrap())
+        };
         let client = azure_common::config::build_client(
-            self.connection_string.clone().into(),
-            self.container_name.clone(),
+            authorization,
+            self.storage_account.clone(),
+            &self.container_name,
             &crate::config::ProxyConfig::default(),
+            self.tls_server_certificate.clone(),
         )
         .unwrap();
 
@@ -265,7 +554,7 @@ impl AzureBlobSinkConfig {
         let mut names = Vec::new();
         while let Some(result) = pager.next().await {
             let item = result.expect("Failed to fetch blobs");
-            if let Some(name) = item.name.and_then(|bn| bn.content)
+            if let Some(name) = item.name.and_then(|b| b.content)
                 && name.starts_with(&prefix)
             {
                 names.push(name);
@@ -276,10 +565,18 @@ impl AzureBlobSinkConfig {
     }
 
     pub async fn get_blob(&self, blob: String) -> (Option<String>, Option<String>, Vec<String>) {
+        let authorization = if self.connection_string.is_none() {
+            self.authorization.clone().unwrap()
+        } else {
+            AzureBlobSinkAuthorization::ConnectionString(self.connection_string.clone().unwrap())
+        };
         let client = azure_common::config::build_client(
-            self.connection_string.clone().into(),
-            self.container_name.clone(),
+            authorization,
+            self.storage_account.clone(),
+            &self.container_name,
             &crate::config::ProxyConfig::default(),
+            #[cfg(test)]
+            self.tls_server_certificate.clone(),
         )
         .unwrap();
 
@@ -337,13 +634,20 @@ impl AzureBlobSinkConfig {
     }
 
     async fn ensure_container(&self) {
+        let authorization = if self.connection_string.is_none() {
+            self.authorization.clone().unwrap()
+        } else {
+            AzureBlobSinkAuthorization::ConnectionString(self.connection_string.clone().unwrap())
+        };
         let client = azure_common::config::build_client(
-            self.connection_string.clone().into(),
-            self.container_name.clone(),
+            authorization,
+            self.storage_account.clone(),
+            &self.container_name,
             &crate::config::ProxyConfig::default(),
+            self.tls_server_certificate.clone(),
         )
         .unwrap();
-        let result = client.create_container(None).await;
+        let result = client.create(None).await;
 
         let response = match result {
             Ok(_) => Ok(()),

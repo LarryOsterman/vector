@@ -1,5 +1,18 @@
+use super::{config::AzureBlobSinkConfig, request_builder::AzureBlobRequestOptions};
+use crate::{
+    codecs::{Encoder, EncodingConfigWithFraming},
+    event::{Event, LogEvent},
+    sinks::{
+        azure_blob::AzureBlobSinkAuthorization,
+        util::{
+            Compression,
+            request_builder::{EncodeResult, RequestBuilder},
+        },
+    },
+};
 use bytes::Bytes;
 use chrono::Utc;
+use url::Url;
 use vector_lib::{
     EstimatedJsonEncodedSizeOf,
     codecs::{
@@ -10,19 +23,11 @@ use vector_lib::{
     request_metadata::GroupedCountByteSize,
 };
 
-use super::{config::AzureBlobSinkConfig, request_builder::AzureBlobRequestOptions};
-use crate::{
-    codecs::{Encoder, EncodingConfigWithFraming},
-    event::{Event, LogEvent},
-    sinks::util::{
-        Compression,
-        request_builder::{EncodeResult, RequestBuilder},
-    },
-};
-
 fn default_config(encoding: EncodingConfigWithFraming) -> AzureBlobSinkConfig {
     AzureBlobSinkConfig {
         connection_string: Default::default(),
+        authorization: Default::default(),
+        storage_account: Default::default(),
         container_name: Default::default(),
         blob_prefix: Default::default(),
         blob_time_format: Default::default(),
@@ -32,6 +37,7 @@ fn default_config(encoding: EncodingConfigWithFraming) -> AzureBlobSinkConfig {
         batch: Default::default(),
         request: Default::default(),
         acknowledgements: Default::default(),
+        tls_server_certificate: None,
     }
 }
 
@@ -48,6 +54,12 @@ fn azure_blob_build_request_without_compression() {
     let sink_config = AzureBlobSinkConfig {
         blob_prefix: "blob".try_into().unwrap(),
         container_name: container_name.clone(),
+        authorization: Some(AzureBlobSinkAuthorization::ConnectionString(
+            String::from(
+                "DefaultEndpointsProtocol=https;AccountName=mylogstorage;AccountKey=storageaccountkeybase64encoded;EndpointSuffix=core.windows.net"
+            ).into()
+        )),
+        storage_account: Some(Url::parse("https://mylogstorage.blob.core.windows.net/").unwrap()),
         ..default_config((None::<FramingConfig>, TextSerializerConfig::default()).into())
     };
     let blob_time_format = String::from("");
