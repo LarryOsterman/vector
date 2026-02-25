@@ -54,11 +54,12 @@ fn azure_blob_build_request_without_compression() {
     let sink_config = AzureBlobSinkConfig {
         blob_prefix: "blob".try_into().unwrap(),
         container_name: container_name.clone(),
-        authorization: Some(AzureBlobSinkAuthorization::ConnectionString(
+        authorization: Some(AzureBlobSinkAuthorization::ConnectionString{
+             connection_string:
             String::from(
                 "DefaultEndpointsProtocol=https;AccountName=mylogstorage;AccountKey=storageaccountkeybase64encoded;EndpointSuffix=core.windows.net"
             ).into()
-        )),
+        }        ),
         storage_account: Some(Url::parse("https://mylogstorage.blob.core.windows.net/").unwrap()),
         ..default_config((None::<FramingConfig>, TextSerializerConfig::default()).into())
     };
@@ -245,4 +246,203 @@ fn azure_blob_build_request_with_uuid() {
     assert_ne!(request.metadata.partition_key, "blob.log".to_string());
     assert_eq!(request.content_encoding, None);
     assert_eq!(request.content_type, "text/plain");
+}
+
+#[tokio::test]
+async fn azure_blob_credentials_from_developer_tools_credential() {
+    use crate::sinks::azure_common::config::credential_from_authorization;
+
+    let config = toml::from_str::<AzureBlobSinkConfig>(
+        r#"
+            storage_account = "https://my-dce-5kyl.eastus-1.storage.azure.com"
+            container_name = "test-container"
+            [encoding]
+            codec="json"
+            [authorization]
+            azure_credential_kind="developer_tools_credential"
+        "#,
+    )
+    .expect("Config parsing failed");
+
+    assert_eq!(
+        config.storage_account.unwrap().as_str(),
+        "https://my-dce-5kyl.eastus-1.storage.azure.com/"
+    );
+    assert_eq!(
+        std::option::Option::Some(AzureBlobSinkAuthorization::DeveloperToolsCredential),
+        config.authorization
+    );
+
+    let credential = credential_from_authorization(config.authorization.unwrap())
+        .expect("Failed to create credential from Developer Tools Credential authorization");
+    // Verify that we can successfully obtain a token from the credential, which confirms it's working properly.
+    assert!(
+        credential
+            .get_token(&["https://storage.azure.com/.default"], None)
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn azure_blob_credentials_from_connection_string_credential() {
+    use crate::sinks::azure_common::config::credential_from_authorization;
+
+    let config = toml::from_str::<AzureBlobSinkConfig>(
+        r#"
+            storage_account = "https://my-dce-5kyl.eastus-1.storage.azure.com"
+            container_name = "test-container"
+            [encoding]
+            codec="json"
+
+            [authorization]
+            azure_credential_kind="connection_string"
+            connection_string = "DefaultEndpointsProtocol=https;AccountName=my-dce-5kyl;AccountKey=your_account_key;EndpointSuffix=core.windows.net"
+        "#,
+    );
+    let config = match config {
+        Err(e) => {
+            panic!("Unexpected error message: {e}");
+        }
+        Ok(config) => config,
+    };
+
+    assert_eq!(
+        config.storage_account.unwrap().as_str(),
+        "https://my-dce-5kyl.eastus-1.storage.azure.com/"
+    );
+    assert_eq!(
+        Some(AzureBlobSinkAuthorization::ConnectionString{
+            connection_string: "DefaultEndpointsProtocol=https;AccountName=my-dce-5kyl;AccountKey=your_account_key;EndpointSuffix=core.windows.net".to_string().into()
+        }),
+        config.authorization
+    );
+
+    credential_from_authorization(config.authorization.unwrap())
+        .expect_err("Succeeded in creating credential from Connection String authorization");
+}
+
+// Verifies successful parsing of all supported credential types in the config, even if the credentials themselves are not valid.
+#[tokio::test]
+async fn azure_blob_credentials_from_various_identity_credentials() {
+    let configs = vec![
+        r#"
+            storage_account = "https://my-dce-5kyl.eastus-1.storage.azure.com"
+            container_name = "test-container"
+            [encoding]
+            codec="json"
+
+            [authorization]
+            azure_credential_kind="connection_string"
+            connection_string = "DefaultEndpointsProtocol=https;AccountName=my-dce-5kyl;AccountKey=your_account_key;EndpointSuffix=core.windows.net"
+        "#,
+        r#"
+            storage_account = "https://my-dce-5kyl.eastus-1.storage.azure.com"
+            container_name = "test-container"
+            [encoding]
+            codec="json"
+
+            [authorization]
+            azure_credential_kind="azure_cli_credential"
+            tenant_id = "01-23456789-0123-4567-8901-234567890123"
+            subscription="01-23456789-0123-4567-8901-234567890123"
+        "#,
+        r#"
+            storage_account = "https://my-dce-5kyl.eastus-1.storage.azure.com"
+            container_name = "test-container"
+            [encoding]
+            codec="json"
+            connection_string = "DefaultEndpointsProtocol=https;AccountName=my-dce-5kyl;AccountKey=your_account_key;EndpointSuffix=core.windows.net"
+        "#,
+        r#"
+            storage_account = "https://my-dce-5kyl.eastus-1.storage.azure.com"
+            container_name = "test-container"
+            [encoding]
+            codec="json"
+
+            [authorization]
+            azure_credential_kind="azure_developer_cli_credential"
+            tenant_id = "01-23456789-0123-4567-8901-234567890123"
+        "#,
+        r#"
+            storage_account = "https://my-dce-5kyl.eastus-1.storage.azure.com"
+            container_name = "test-container"
+            [encoding]
+            codec="json"
+
+            [authorization]
+            azure_credential_kind="azure_pipelines_credential"
+            tenant_id = "23456789-0123-4567-8901-234567890123"
+            subscription_id = "23456789-0123-4567-8901-234567890123"
+            service_connection_id = "01-23456789-0123-4567-89012341234"
+            system_access_token = "fake_token"
+        "#,
+        r#"
+            storage_account = "https://my-dce-5kyl.eastus-1.storage.azure.com"
+            container_name = "test-container"
+            [encoding]
+            codec="json"
+
+            [authorization]
+            azure_credential_kind="workload_identity_credential"
+            client_id = "23456789-0123-4567-8901-234567890123"
+            tenant_id = "23456789-0123-4567-8901-234567890123"
+            subscription_id = "23456789-0123-4567-8901-234567890123"
+            system_access_token= "fake_token"
+        "#,
+        r#"
+            storage_account = "https://my-dce-5kyl.eastus-1.storage.azure.com"
+            container_name = "test-container"
+            [encoding]
+            codec="json"
+
+            [authorization]
+            azure_credential_kind="managed_identity_credential"
+            managed_identity_id = "01-23456789-0123-4567-8901-234567890123"
+            managed_identity_type = "SystemAssigned"
+        "#,
+        r#"
+            storage_account = "https://my-dce-5kyl.eastus-1.storage.azure.com"
+            container_name = "test-container"
+            [encoding]
+            codec="json"
+
+            [authorization]
+            azure_credential_kind="client_assertion_credential"
+            tenant_id = "01-23456789-0123-4567-8901-234567890123"
+            client_id = "01-23456789-0123-4567-8901-234567890123"
+            subscription_id = "01-23456789-0123-4567-8901-234567890123"
+        "#,
+        r#"
+            storage_account = "https://my-dce-5kyl.eastus-1.storage.azure.com"
+            container_name = "test-container"
+            [encoding]
+            codec="json"
+
+            [authorization]
+            azure_credential_kind="client_certificate_credential"
+            tenant_id = "01-23456789-0123-4567-8901-234567890123"
+            client_id = "01-23456789-0123-4567-8901-234567890123"
+            certificate = "==== BEGIN CERTIFICATE====\nbase64encodedcertificate\n==== END CERTIFICATE===="
+            certificate_password = "fake_password"
+        "#,
+        r#"
+            storage_account = "https://my-dce-5kyl.eastus-1.storage.azure.com"
+            container_name = "test-container"
+            [encoding]
+            codec="json"
+
+            [authorization]
+            azure_credential_kind="client_secret_credential"
+            tenant_id = "01-23456789-0123-4567-8901-234567890123"
+            client_id = "01-23456789-0123-4567-8901-234567890123"
+            client_secret = "fake_secret"
+        "#,
+    ];
+    for config_str in configs {
+        let config = toml::from_str::<AzureBlobSinkConfig>(config_str);
+        if let Err(e) = &config {
+            panic!("Unexpected error message for config: {config_str}\nError: {e}");
+        }
+    }
 }

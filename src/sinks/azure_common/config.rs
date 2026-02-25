@@ -1,3 +1,5 @@
+// cspell:ignore retriable
+
 use std::sync::Arc;
 
 use azure_core::error::Error as AzureCoreError;
@@ -159,6 +161,22 @@ fn process_connection_string(
     Ok((url, None, auth_policy))
 }
 
+pub(crate) fn credential_from_authorization(
+    authorization: AzureBlobSinkAuthorization,
+) -> crate::Result<Arc<dyn TokenCredential>> {
+    match authorization {
+
+        AzureBlobSinkAuthorization::ConnectionString{..} => {
+            Err("Connection string authorization is not compatible with token credential extraction. Use the connection string to build the client directly.".into())
+        }
+        AzureBlobSinkAuthorization::DeveloperToolsCredential => {
+            Ok(DeveloperToolsCredential::new(None)
+                .map_err(|e| format!("Failed to create Developer Tools Credential: {e}"))?)
+        }
+        _ => Err("Unsupported authorization method".into()),
+    }
+}
+
 pub fn build_client(
     authorization: AzureBlobSinkAuthorization,
     account_url: Option<Url>,
@@ -168,21 +186,23 @@ pub fn build_client(
 ) -> crate::Result<Arc<BlobContainerClient>> {
     // Parse connection string without legacy SDK
     let (url, token_credential, shared_key_policy) = match authorization {
-        AzureBlobSinkAuthorization::ConnectionString(connection_string) => {
+        AzureBlobSinkAuthorization::ConnectionString { connection_string } => {
             // Process the connection string, decompose into Url and optional Shared Key policy (no token_credential).
             process_connection_string(connection_string.inner(), container_name)?
         }
-        AzureBlobSinkAuthorization::DeveloperToolsCredential => {
+        _ => {
             // Use Azure Identity's Developer Tools Credential for authentication.
             // This credential supports various developer tools authentication methods, such as Azure CLI, Visual Studio Code, and Azure PowerShell.
-            let token_credential: Arc<dyn TokenCredential> = DeveloperToolsCredential::new(None)
-                .map_err(|e| format!("Failed to create Developer Tools Credential: {e}"))?;
+            let token_credential = credential_from_authorization(authorization)?;
             let Some(mut account_url) = account_url else {
                 return Err(
                     "Storage account must be provided when using managed identity authentication"
                         .into(),
                 );
             };
+            // Append the container name to the account URL path if not already present.
+            // This mirrors what the Azure SDK for Rust does internally when creating a
+            // BlobContainerClient from an account URL and container name before calling `BlobContainerClient::from_url`
             {
                 let mut path_segments = account_url.path_segments_mut().map_err(|_| {
                     "Invalid account URL: missing path segments for container name".to_string()
@@ -190,9 +210,6 @@ pub fn build_client(
                 path_segments.extend([container_name]);
             }
             (account_url, Some(token_credential), None)
-        }
-        _ => {
-            return Err("Unsupported authorization method".into());
         }
     };
 

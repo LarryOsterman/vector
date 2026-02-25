@@ -48,7 +48,9 @@ async fn azure_blob_connection_string_healthcheck_passed() {
     let authorization = if config.connection_string.is_none() {
         config.authorization.unwrap().clone()
     } else {
-        AzureBlobSinkAuthorization::ConnectionString(config.connection_string.unwrap().clone())
+        AzureBlobSinkAuthorization::ConnectionString {
+            connection_string: config.connection_string.clone().unwrap(),
+        }
     };
     let client = azure_common::config::build_client(
         authorization,
@@ -71,7 +73,9 @@ async fn azure_blob_token_credential_healthcheck_passed() {
     let authorization = if config.connection_string.is_none() {
         config.authorization.unwrap().clone()
     } else {
-        AzureBlobSinkAuthorization::ConnectionString(config.connection_string.unwrap().clone())
+        AzureBlobSinkAuthorization::ConnectionString {
+            connection_string: config.connection_string.clone().unwrap(),
+        }
     };
     let client = azure_common::config::build_client(
         authorization,
@@ -98,7 +102,9 @@ async fn azure_blob_healthcheck_connection_string_unknown_container() {
     let authorization = if config.connection_string.is_none() {
         config.authorization.unwrap().clone()
     } else {
-        AzureBlobSinkAuthorization::ConnectionString(config.connection_string.unwrap().clone())
+        AzureBlobSinkAuthorization::ConnectionString {
+            connection_string: config.connection_string.clone().unwrap(),
+        }
     };
     let client = azure_common::config::build_client(
         authorization,
@@ -129,7 +135,9 @@ async fn azure_blob_healthcheck_token_credential_unknown_container() {
     let authorization = if config.connection_string.is_none() {
         config.authorization.unwrap().clone()
     } else {
-        AzureBlobSinkAuthorization::ConnectionString(config.connection_string.unwrap().clone())
+        AzureBlobSinkAuthorization::ConnectionString {
+            connection_string: config.connection_string.clone().unwrap(),
+        }
     };
     let client = azure_common::config::build_client(
         authorization,
@@ -511,7 +519,9 @@ impl AzureBlobSinkConfig {
         let authorization = if self.connection_string.is_none() {
             self.authorization.clone().unwrap()
         } else {
-            AzureBlobSinkAuthorization::ConnectionString(self.connection_string.clone().unwrap())
+            AzureBlobSinkAuthorization::ConnectionString {
+                connection_string: self.connection_string.clone().unwrap(),
+            }
         };
         let client = azure_common::config::build_client(
             authorization,
@@ -536,7 +546,9 @@ impl AzureBlobSinkConfig {
         let authorization = if self.connection_string.is_none() {
             self.authorization.clone().unwrap()
         } else {
-            AzureBlobSinkAuthorization::ConnectionString(self.connection_string.clone().unwrap())
+            AzureBlobSinkAuthorization::ConnectionString {
+                connection_string: self.connection_string.clone().unwrap(),
+            }
         };
         let client = azure_common::config::build_client(
             authorization,
@@ -568,7 +580,9 @@ impl AzureBlobSinkConfig {
         let authorization = if self.connection_string.is_none() {
             self.authorization.clone().unwrap()
         } else {
-            AzureBlobSinkAuthorization::ConnectionString(self.connection_string.clone().unwrap())
+            AzureBlobSinkAuthorization::ConnectionString {
+                connection_string: self.connection_string.clone().unwrap(),
+            }
         };
         let client = azure_common::config::build_client(
             authorization,
@@ -637,7 +651,9 @@ impl AzureBlobSinkConfig {
         let authorization = if self.connection_string.is_none() {
             self.authorization.clone().unwrap()
         } else {
-            AzureBlobSinkAuthorization::ConnectionString(self.connection_string.clone().unwrap())
+            AzureBlobSinkAuthorization::ConnectionString {
+                connection_string: self.connection_string.clone().unwrap(),
+            }
         };
         let client = azure_common::config::build_client(
             authorization,

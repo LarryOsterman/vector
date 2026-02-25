@@ -34,10 +34,42 @@ impl TowerRequestConfigDefaults for AzureBlobTowerRequestConfigDefaults {
     const RATE_LIMIT_NUM: u64 = 250;
 }
 
+/// The type of managed identity to use for authentication when using Managed Identity Credential authentication.
+#[configurable_component]
+#[derive(Clone, Debug, PartialEq)]
+pub enum ManagedIdentityType {
+    /// System Assigned Managed Identity
+    ///
+    /// Enabled directly on an Azure resource and cannot be shared across resources.
+    SystemAssigned,
+
+    /// User Assigned Managed Identity
+    ///
+    /// A standalone Azure resource that can be assigned to one or more Azure resources.
+    ClientId,
+
+    /// User Assigned Managed Identity identified by Resource ID
+    ///
+    /// A standalone Azure resource that can be assigned to one or
+    /// more Azure resources.
+    ResourceId,
+
+    /// User Assigned Managed Identity identified by Object ID
+    ///
+    /// A standalone Azure resource that can be assigned to one or
+    /// more Azure resources.
+    ObjectId,
+}
+
 /// Authorization methods for the Azure Blob Storage sink.
 ///
 #[configurable_component]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
+#[serde(
+    tag = "azure_credential_kind",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum AzureBlobSinkAuthorization {
     /// The Azure Blob Storage Account connection string.
     ///
@@ -62,19 +94,160 @@ pub enum AzureBlobSinkAuthorization {
     ///
     /// Numerous security breaches have occurred due to leaked connection strings,
     /// so please take care to manage them securely. Consider using secret management tools to store and manage connection strings securely.
-    ConnectionString(SensitiveString),
+    #[configurable]
+    ConnectionString {
+        /// The Azure Blob Storage Account connection string.
+        connection_string: SensitiveString,
+    },
 
-    /// Use Azure AD Workload Identity for authentication. This method is typically used when Vector is running in an Azure environment that supports workload identity, such as Azure Kubernetes Service (AKS) with workload identity enabled.
-    WorkloadIdentityCredential,
-
-    /// Use Managed Identity Credential for authentication. This method is typically used when Vector is running in an Azure environment that supports managed identities, such as Azure Virtual Machines or Azure App Service.
-    ManagedIdentityCredential,
-
-    /// Use Azure Pipeline Credential for authentication. This method is typically used in Azure DevOps pipelines where the pipeline has been granted access to the Azure Blob Storage resources.
-    AzurePipelineCredential,
-
-    /// Use Developer Tools Credential for authentication. This method is typically used for local development and testing, allowing developers to authenticate using their Azure developer tools credentials.
+    /// Use Developer Tools Credential for authentication.
+    ///
+    /// This method is typically used for local development and testing,
+    /// allowing developers to authenticate using their Azure developer
+    /// tools credentials.
+    #[configurable]
     DeveloperToolsCredential,
+
+    /// Use Azure CLI Credential for authentication.
+    ///
+    /// This method allows authentication using the Azure CLI credentials,
+    /// which are commonly used for local development and testing.
+    #[configurable]
+    AzureCliCredential {
+        /// The tenant ID to use for authentication.
+        ///
+        /// This is required when using Azure CLI Credential authentication.
+        #[configurable(metadata(docs::examples = "00000000-0000-0000-0000-000000000000"))]
+        tenant_id: String,
+        /// The subscription ID to use for authentication.
+        ///
+        /// This is required when using Azure CLI Credential authentication.
+        #[configurable(metadata(docs::examples = "00000000-0000-0000-0000-000000000000"))]
+        subscription: String,
+        // /// Timeout for the Azure CLI process to complete.
+        // ///
+        // /// If the process does not complete within this duration,
+        // /// authentication will fail. This is optional and
+        // /// defaults to 60 seconds if not specified.
+        // process_timeout: Option<std::time::Duration>,
+
+        // /// Additionally allowed tenant IDs for authentication.
+        // ///
+        // /// This is optional and can be used to specify additional
+        // /// tenant IDs that are allowed for authentication when
+        // /// using Azure CLI Credential authentication.
+        // additionally_allowed_tenants: Option<Vec<String>>,
+    },
+    /// Use Azure Developer CLI Credential for authentication.
+    ///
+    /// This method allows authentication using the Azure Developer CLI
+    /// credentials, which are commonly used for local development and testing.
+    #[configurable]
+    AzureDeveloperCliCredential {
+        /// Identifies the tenant the credential should authenticate in.
+        ///
+        /// Defaults to the azd environment, which is the tenant of the selected Azure subscription.
+        #[configurable(metadata(docs::examples = "00000000-0000-0000-0000-000000000000"))]
+        tenant_id: Option<String>,
+    },
+
+    /// Authenticates an Azure Pipelines Service Connection.
+    #[configurable]
+    AzurePipelinesCredential {
+        /// The ID of the Azure Pipelines Service Connection to authenticate.
+        #[configurable(metadata(docs::examples = "00000000-0000-0000-0000-000000000000"))]
+        service_connection_id: String,
+        /// The tenant ID associated with the Azure Pipelines Service Connection.
+        #[configurable(metadata(docs::examples = "00000000-0000-0000-0000-000000000000"))]
+        tenant_id: String,
+        /// The subscription ID associated with the Azure Pipelines Service Connection.
+        #[configurable(metadata(docs::examples = "00000000-0000-0000-0000-000000000000"))]
+        subscription_id: String,
+        ///  System Access Token
+        ///
+        /// Security token for the running build. See
+        /// [Azure Pipelines documentation](https://learn.microsoft.com/azure/devops/pipelines/build/variables?view=azure-devops#systemaccesstoken)
+        /// for an example showing how to get this value.
+        system_access_token: SensitiveString,
+    },
+
+    /// Authenticates an Entra Workload Identity on Kubernetes.
+    #[configurable]
+    WorkloadIdentityCredential {
+        /// The tenant ID associated with the Entra Workload Identity.
+        tenant_id: String,
+        /// The client ID associated with the Entra Workload Identity.
+        client_id: String,
+        /// The subscription ID associated with the Entra Workload Identity.
+        subscription_id: String,
+        ///  System Access Token
+        ///
+        /// Security token for the running build. See
+        /// [Azure Pipelines documentation](https://learn.microsoft.com/azure/devops/pipelines/build/variables?view=azure-devops#systemaccesstoken)
+        /// for an example showing how to get this value.
+        system_access_token: SensitiveString,
+    },
+
+    /// Use Managed Identity Credential for authentication.
+    ///
+    /// This method allows authentication using Azure Managed Identities,
+    /// which is commonly used for applications running in Azure environments.
+    #[configurable]
+    ManagedIdentityCredential {
+        /// The type of managed identity to use for authentication.
+        managed_identity_type: ManagedIdentityType,
+        /// The id of the user assigned managed identity to use for authentication.
+        managed_identity_id: Option<String>,
+    },
+    /// Use Client Assertion Credential for authentication.
+    #[configurable]
+    ClientAssertionCredential {
+        /// The tenant ID associated with the Entra Workload Identity.
+        tenant_id: String,
+        /// The client ID associated with the Entra Workload Identity.
+        client_id: String,
+        /// The subscription ID associated with the Entra Workload Identity.
+        subscription_id: String,
+    },
+    /// Use Client Certificate Credential to authenticate an application
+    /// with a certificate.
+    #[configurable]
+    ClientCertificateCredential {
+        /// The tenant ID associated with the Entra Workload Identity.
+        tenant_id: String,
+        /// The client ID associated with the Entra Workload Identity.
+        client_id: String,
+        /// Base64 encoded PKCS12 certificate with its RSA private key.
+        certificate: SensitiveString,
+        /// The password for the client certificate, if applicable.
+        certificate_password: Option<SensitiveString>,
+    },
+    /// Use Client Secret Credential for authentication.
+    ///
+    /// This method allows authentication using a client secret, which is a string value
+    /// that serves as a password for the application.
+    #[configurable]
+    ClientSecretCredential {
+        /// The tenant ID associated with the Entra Workload Identity.
+        tenant_id: String,
+        /// The client ID associated with the Entra Workload Identity.
+        client_id: String,
+        /// The client secret value to authenticate with.
+        client_secret: SensitiveString,
+    },
+    // The following credential types are currently not supported, but may be added in the future:
+    //
+    // AzurePowerShellCredential,
+    // EnvironmentCredential,
+    // InteractiveBrowserCredential,
+    // VisualStudioCredential,
+    // VisualStudioCodeCredential,
+    // BrokerCredential,
+    // /// Use an API Key for authentication.
+    // ///
+    // /// Note: Do NOT put API keys in appsettings.json.
+    // /// Use environment variables or Key Vault secrets instead. See https://aka.ms/azsdk/config/secrets
+    // ApiKeyCredential(SensitiveString),
 }
 
 /// Configuration for the `azure_blob` sink.
@@ -262,7 +435,9 @@ impl SinkConfig for AzureBlobSinkConfig {
             );
         }
         let authorization = if self.connection_string.is_some() {
-            AzureBlobSinkAuthorization::ConnectionString(self.connection_string.clone().unwrap())
+            AzureBlobSinkAuthorization::ConnectionString {
+                connection_string: self.connection_string.clone().unwrap(),
+            }
         } else {
             self.authorization.clone().unwrap()
         };
